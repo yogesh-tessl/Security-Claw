@@ -8,23 +8,6 @@ metadata: { "openclaw": { "emoji": "🧠" } }
 
 Search and retrieve facts stored across sessions using the memory plugin.
 
-## When to Use
-
-✅ **USE this skill when:**
-
-- Recalling information stored in a previous session (user prefs, targets, findings)
-- Persisting important information so it's available in future sessions
-- Building agents that remember context across conversations
-- Looking up past engagement notes, credentials, or scope definitions
-
-## When NOT to Use
-
-❌ **DON'T use this skill when:**
-
-- Reading current session context (just reference earlier messages)
-- File storage → use `write`/`read` tools
-- Structured DB queries → use the relevant DB skill
-
 ## Enable Memory
 
 ```json5
@@ -43,6 +26,12 @@ Search and retrieve facts stored across sessions using the memory plugin.
 | --------------- | ------------------------------------ |
 | `memory_search` | Semantic search over stored memories |
 | `memory_get`    | Retrieve a specific memory by ID     |
+
+## Workflow
+
+1. **Search** — query stored memories with `memory_search`
+2. **Retrieve** — fetch full details of a relevant memory via `memory_get` using the returned ID
+3. **Apply** — use the recalled context in the current task
 
 ## Common Patterns
 
@@ -63,12 +52,23 @@ Search and retrieve facts stored across sessions using the memory plugin.
 }
 ```
 
+**Example response:**
+
+```json
+[
+  { "id": "mem_abc123", "content": "Target scope: 192.168.10.0/24", "score": 0.92 },
+  { "id": "mem_def456", "content": "Found SQLi on /api/v1/search", "score": 0.85 }
+]
+```
+
+If no results are returned, broaden the query terms or check that memories were stored in a prior session.
+
 ### Get a Specific Memory
 
 ```json
 {
   "tool": "memory_get",
-  "id": "memory_id"
+  "id": "mem_abc123"
 }
 ```
 
@@ -99,11 +99,3 @@ Save the finding: SQL injection on /api/v1/search?q= parameter
 }
 ```
 
-## Usage from Agent
-
-```
-Search memory for the target scope defined last week
-Recall any credentials or API tokens discovered in previous sessions
-What did I save about the Acme Corp engagement findings?
-Search memory for anything related to the cloud infrastructure enumeration
-```
